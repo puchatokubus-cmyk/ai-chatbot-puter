@@ -82,7 +82,7 @@ function renderMessages() {
     }
 
     elements.messages.innerHTML = chat.messages.map(msg => {
-        const searchBadge = msg.searched ? '<span class="search-badge">Wyszukiwanie</span>' : '';
+        const searchBadge = msg.searched ? '<span class="search-badge">+ szukanie w sieci</span>' : '';
         return `
             <div class="message ${msg.role}">
                 <div class="message-role">${msg.role === 'user' ? 'Ty' : 'TrapAi'}${searchBadge}</div>
@@ -104,56 +104,6 @@ window.quickAsk = function(text) {
     elements.userInput.value = text;
     sendMessage();
 };
-
-async function searchWeb(query) {
-    try {
-        const searchQuery = query + ' trap muzyka newsy 2025 2026';
-        const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(searchQuery)}`;
-        
-        const response = await puter.net.fetch(searchUrl);
-        const html = await response.text();
-        
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(html, 'text/html');
-        
-        const results = [];
-        doc.querySelectorAll('.result').forEach((el, i) => {
-            if (i >= 5) return;
-            const titleEl = el.querySelector('.result__title a, .result__a');
-            const snippetEl = el.querySelector('.result__snippet');
-            
-            const title = titleEl?.textContent?.trim() || '';
-            const snippet = snippetEl?.textContent?.trim() || '';
-            
-            if (title) {
-                results.push({ title, snippet });
-            }
-        });
-        
-        if (results.length > 0) {
-            return results.map((r, i) => 
-                `${i + 1}. ${r.title}\n   ${r.snippet}`
-            ).join('\n\n');
-        }
-        
-        const fallbackResults = [];
-        doc.querySelectorAll('a.result__url, .result__title').forEach((el, i) => {
-            if (i >= 5) return;
-            const text = el.textContent?.trim() || '';
-            if (text && text.length > 5) {
-                fallbackResults.push(text);
-            }
-        });
-        
-        if (fallbackResults.length > 0) {
-            return 'Znaleziono:\n' + fallbackResults.join('\n');
-        }
-        
-        return 'Nie znaleziono wynikow w sieci.';
-    } catch (error) {
-        return `Blad wyszukiwania: ${error.message}`;
-    }
-}
 
 async function sendMessage() {
     const text = elements.userInput.value.trim();
@@ -197,10 +147,9 @@ Twoje zadania:
 - Wyjasniasz historie i ewolucje trapu
 - Odpowiadasz o kulturze hip-hopu i streetwearze
 - Jezyk: polski (chyba ze uzytkownik pisze po angielsku)
-- Styl: luzny, ale kompetentny - jak kumpel ktory zna sie na rzeczy`;
-
-        let searchResults = '';
-        let searched = false;
+- Styl: luzny, ale kompetentny - jak kumpel ktory zna sie na rzeczy
+- Gdy uzytkownik pyta o aktualne newsy, premiery, co sie dzieje - SZUKAJ w internecie
+- Podawaj zrodla jesli masz dostep do wyszukiwania`;
 
         const lowerText = text.toLowerCase();
         const shouldSearch = searchEnabled || 
@@ -213,23 +162,18 @@ Twoje zadania:
             lowerText.includes('premiera') ||
             lowerText.includes('premiery');
 
-        if (shouldSearch) {
-            searchResults = await searchWeb(text);
-            searched = true;
-        }
-
-        let userMessage = text;
-        if (searchResults && searchResults !== 'Nie znaleziono wynikow w sieci.') {
-            userMessage = `${text}\n\n[Wyniki wyszukiwania w internecie]:\n${searchResults}`;
-        }
-
         const messagesPayload = [
             { role: 'system', content: systemPrompt },
-            ...chat.messages.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
-            { role: 'user', content: userMessage }
+            ...chat.messages.map(m => ({ role: m.role, content: m.content }))
         ];
 
-        const response = await puter.ai.chat(messagesPayload, { model });
+        const chatOptions = { model };
+
+        if (shouldSearch) {
+            chatOptions.tools = [{ type: "web_search" }];
+        }
+
+        const response = await puter.ai.chat(messagesPayload, chatOptions);
 
         let aiResponse = '';
         if (typeof response === 'string') {
@@ -244,7 +188,7 @@ Twoje zadania:
             aiResponse = JSON.stringify(response);
         }
 
-        chat.messages.push({ role: 'assistant', content: aiResponse, searched });
+        chat.messages.push({ role: 'assistant', content: aiResponse, searched: shouldSearch });
         saveChats();
 
     } catch (error) {
