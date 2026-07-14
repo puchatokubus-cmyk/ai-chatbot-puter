@@ -105,6 +105,41 @@ window.quickAsk = function(text) {
     sendMessage();
 };
 
+async function searchWeb(query) {
+    try {
+        const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+        const response = await puter.net.fetch(searchUrl);
+        const html = await response.text();
+        
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+        
+        const results = [];
+        const resultElements = doc.querySelectorAll('.result');
+        
+        for (let i = 0; i < Math.min(resultElements.length, 5); i++) {
+            const el = resultElements[i];
+            const titleEl = el.querySelector('.result__title a, .result__a');
+            const snippetEl = el.querySelector('.result__snippet');
+            
+            if (titleEl) {
+                const title = titleEl.textContent.trim();
+                const snippet = snippetEl ? snippetEl.textContent.trim() : '';
+                results.push(`${title} - ${snippet}`);
+            }
+        }
+        
+        if (results.length > 0) {
+            return results.join('\n\n');
+        }
+        
+        const allText = doc.body.innerText.substring(0, 2000);
+        return allText || 'Brak wynikow';
+    } catch (error) {
+        return `Blad: ${error.message}`;
+    }
+}
+
 async function sendMessage() {
     const text = elements.userInput.value.trim();
     if (!text) return;
@@ -138,19 +173,7 @@ async function sendMessage() {
 
     try {
         const model = elements.modelSelect.value;
-        const systemPrompt = `Jestes TrapAi - ekspertem od trapowej muzyki, kultury i newsow. 
-
-Twoje zadania:
-- Odpowiadasz o trapowej muzyce (polskiej i swiatowej)
-- Znasz najnowsze newsy, premiery, plotki ze swiata trapu
-- Polecasz albumy, utwory, artystow
-- Wyjasniasz historie i ewolucje trapu
-- Odpowiadasz o kulturze hip-hopu i streetwearze
-- Jezyk: polski (chyba ze uzytkownik pisze po angielsku)
-- Styl: luzny, ale kompetentny - jak kumpel ktory zna sie na rzeczy
-- Gdy uzytkownik pyta o aktualne newsy, premiery, co sie dzieje - SZUKAJ w internecie
-- Podawaj zrodla jesli masz dostep do wyszukiwania`;
-
+        
         const lowerText = text.toLowerCase();
         const shouldSearch = searchEnabled || 
             lowerText.includes('szukaj') || 
@@ -160,20 +183,48 @@ Twoje zadania:
             lowerText.includes('aktualne') ||
             lowerText.includes('co sie dzieje') ||
             lowerText.includes('premiera') ||
-            lowerText.includes('premiery');
+            lowerText.includes('premiery') ||
+            lowerText.includes('kto') ||
+            lowerText.includes('jakie') ||
+            lowerText.includes('jakie sa') ||
+            lowerText.includes('co nowego');
+
+        let searchContext = '';
+        let searched = false;
+
+        if (shouldSearch) {
+            const searchQuery = text + ' trap muzyka 2025 2026';
+            searchContext = await searchWeb(searchQuery);
+            searched = true;
+        }
+
+        let systemPrompt = `Jestes TrapAi - ekspertem od trapowej muzyki, kultury i newsow. 
+
+Twoje zadania:
+- Odpowiadasz o trapowej muzyce (polskiej i swiatowej)
+- Znasz najnowsze newsy, premiery, plotki ze swiata trapu
+- Polecasz albumy, utwory, artystow
+- Wyjasniasz historie i ewolucje trapu
+- Odpowiadasz o kulturze hip-hopu i streetwearze
+- Jezyk: polski (chyba ze uzytkownik pisze po angielsku)
+- Styl: luzny, ale kompetentny - jak kumpel ktory zna sie na rzeczy`;
+
+        if (searchContext) {
+            systemPrompt += `\n\nMasz dostep do swiezych wynikow wyszukiwania z internecie. Uzyj ich aby odpowiedziec na pytanie uzytkownika. Podawaj aktualne informacje z 2025/2026 roku. Jesli wyniki wyszukiwania zawieraja relevantne informacje, odnies sie do nich.`;
+        }
+
+        let userMessage = text;
+        if (searchContext) {
+            userMessage = `${text}\n\n--- WYNIKI WYSZUKIWANIA W INTERNECIE ---\n${searchContext}\n--- KONIEC WYNIKOW ---`;
+        }
 
         const messagesPayload = [
             { role: 'system', content: systemPrompt },
-            ...chat.messages.map(m => ({ role: m.role, content: m.content }))
+            ...chat.messages.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
+            { role: 'user', content: userMessage }
         ];
 
-        const chatOptions = { model };
-
-        if (shouldSearch) {
-            chatOptions.tools = [{ type: "web_search" }];
-        }
-
-        const response = await puter.ai.chat(messagesPayload, chatOptions);
+        const response = await puter.ai.chat(messagesPayload, { model });
 
         let aiResponse = '';
         if (typeof response === 'string') {
@@ -188,7 +239,7 @@ Twoje zadania:
             aiResponse = JSON.stringify(response);
         }
 
-        chat.messages.push({ role: 'assistant', content: aiResponse, searched: shouldSearch });
+        chat.messages.push({ role: 'assistant', content: aiResponse, searched });
         saveChats();
 
     } catch (error) {
