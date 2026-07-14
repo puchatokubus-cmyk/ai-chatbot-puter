@@ -35,6 +35,16 @@ function createChat() {
     elements.userInput.focus();
 }
 
+function deleteChat(id) {
+    chats = chats.filter(c => c.id !== id);
+    if (currentChatId === id) {
+        currentChatId = chats.length > 0 ? chats[0].id : null;
+    }
+    saveChats();
+    renderChatHistory();
+    renderMessages();
+}
+
 function getCurrentChat() {
     return chats.find(c => c.id === currentChatId);
 }
@@ -42,18 +52,52 @@ function getCurrentChat() {
 function renderChatHistory() {
     elements.chatHistory.innerHTML = chats.map(chat => `
         <div class="chat-item ${chat.id === currentChatId ? 'active' : ''}" data-id="${chat.id}">
-            ${chat.title}
+            <span class="chat-item-text">${escapeHtml(chat.title)}</span>
+            <button class="chat-delete" data-id="${chat.id}" title="Usun czat">&times;</button>
         </div>
     `).join('');
 
     elements.chatHistory.querySelectorAll('.chat-item').forEach(el => {
-        el.addEventListener('click', () => {
+        el.addEventListener('click', (e) => {
+            if (e.target.classList.contains('chat-delete')) return;
             currentChatId = el.dataset.id;
             saveChats();
             renderChatHistory();
             renderMessages();
         });
     });
+
+    elements.chatHistory.querySelectorAll('.chat-delete').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            deleteChat(btn.dataset.id);
+        });
+    });
+}
+
+function formatMarkdown(text) {
+    let html = escapeHtml(text);
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+    html = html.replace(/`(.+?)`/g, '<code>$1</code>');
+    const lines = html.split('\n');
+    const formatted = [];
+    let inList = false;
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.match(/^[-*]\s/)) {
+            if (!inList) { formatted.push('<ul>'); inList = true; }
+            formatted.push(`<li>${trimmed.slice(2)}</li>`);
+        } else if (trimmed.match(/^\d+\.\s/)) {
+            if (!inList) { formatted.push('<ol>'); inList = true; }
+            formatted.push(`<li>${trimmed.replace(/^\d+\.\s/, '')}</li>`);
+        } else {
+            if (inList) { formatted.push(inList === true ? '</ul>' : '</ol>'); inList = false; }
+            formatted.push(line);
+        }
+    }
+    if (inList) formatted.push(inList === true ? '</ul>' : '</ol>');
+    return formatted.join('\n');
 }
 
 function renderMessages() {
@@ -84,14 +128,19 @@ function renderMessages() {
     }
 
     elements.messages.innerHTML = chat.messages.map(msg => {
-        const searchBadge = msg.searched ? '<span class="search-badge">+ szukanie w sieci</span>' : '';
+        const searchBadge = msg.searched ? `<span class="search-badge">+ szukanie: ${msg.searchEngine || 'web'}</span>` : '';
         const sourcesHtml = msg.sources && msg.sources.length > 0 
-            ? `<div class="message-sources"><span>Zrodla:</span> ${msg.sources.map((s, i) => `<a href="${s}" target="_blank">[${i+1}]</a>`).join(' ')}</div>`
+            ? `<div class="message-sources"><span>Zrodla:</span> ${msg.sources.map((s, i) => {
+                const title = s.title || `Zrodlo ${i+1}`;
+                const url = s.url || s;
+                return `<a href="${url}" target="_blank" rel="noopener">${escapeHtml(title.substring(0, 40))}</a>`;
+            }).join(' ')}</div>`
             : '';
+        const content = msg.role === 'assistant' ? formatMarkdown(msg.content) : escapeHtml(msg.content);
         return `
             <div class="message ${msg.role}">
                 <div class="message-role">${msg.role === 'user' ? 'Ty' : 'TrapAi'}${searchBadge}</div>
-                <div class="message-content">${escapeHtml(msg.content)}</div>
+                <div class="message-content">${content}</div>
                 ${sourcesHtml}
             </div>
         `;
@@ -246,23 +295,42 @@ async function searchGoogle(query) {
 
 async function searchWeb(query) {
     const cached = getCachedResults(query);
-    if (cached) return cached;
+    if (cached) return { results: cached, engine: 'cache' };
     
-    let results = [];
+    const year = new Date().getFullYear();
+    const fullQuery = `${query} trap muzyka ${year}`;
     
-    results = await searchDuckDuckGo(query);
-    if (results.length === 0) {
-        results = await searchBrave(query);
+    const [ddgResults, braveResults, googleResults] = await Promise.allSettled([
+        searchDuckDuckGo(fullQuery),
+        searchBrave(fullQuery),
+        searchGoogle(fullQuery)
+    ]);
+    
+    let allResults = [];
+    let engine = '';
+    
+    const ddg = ddgResults.status === 'fulfilled' ? ddgResults.value : [];
+    const brave = braveResults.status === 'fulfilled' ? braveResults.value : [];
+    const google = googleResults.status === 'fulfilled' ? googleResults.value : [];
+    
+    if (ddg.length > 0) { allResults = ddg; engine = 'DuckDuckGo'; }
+    else if (brave.length > 0) { allResults = brave; engine = 'Brave'; }
+    else if (google.length > 0) { allResults = google; engine = 'Google'; }
+    
+    const uniqueResults = [];
+    const seenUrls = new Set();
+    for (const r of allResults) {
+        if (r.url && !seenUrls.has(r.url)) {
+            seenUrls.add(r.url);
+            uniqueResults.push(r);
+        }
     }
-    if (results.length === 0) {
-        results = await searchGoogle(query);
+    
+    if (uniqueResults.length > 0) {
+        setCacheResults(query, uniqueResults);
     }
     
-    if (results.length > 0) {
-        setCacheResults(query, results);
-    }
-    
-    return results;
+    return { results: uniqueResults, engine };
 }
 
 function formatSearchResults(results) {
@@ -270,7 +338,7 @@ function formatSearchResults(results) {
         return { text: '', sources: [] };
     }
     
-    const sources = results.map(r => r.url).filter(u => u);
+    const sources = results.map(r => ({ title: r.title, url: r.url })).filter(s => s.url);
     const text = results.map((r, i) => {
         return `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`;
     }).join('\n\n');
@@ -326,14 +394,21 @@ async function sendMessage() {
             lowerText.includes('jakie sa') ||
             lowerText.includes('co nowego') ||
             lowerText.includes('nowy') ||
-            lowerText.includes('nowa');
+            lowerText.includes('nowa') ||
+            lowerText.includes('ktory') ||
+            lowerText.includes('ktora') ||
+            lowerText.includes('poleca') ||
+            lowerText.includes('polecasz');
 
         let searchResults = [];
         let searched = false;
         let sources = [];
+        let searchEngine = '';
 
         if (shouldSearch) {
-            searchResults = await searchWeb(text + ' trap muzyka 2025 2026');
+            const searchResponse = await searchWeb(text);
+            searchResults = searchResponse.results;
+            searchEngine = searchResponse.engine;
             searched = true;
         }
 
@@ -350,7 +425,9 @@ Twoje zadania:
 - Odpowiadasz o kulturze hip-hopu i streetwearze
 - Jezyk: polski (chyba ze uzytkownik pisze po angielsku)
 - Styl: luzny, ale kompetentny - jak kumpel ktory zna sie na rzeczy
-- Zawsze podawaj aktualne informacje z 2025/2026 roku`;
+- Zawsze podawaj aktualne informacje z ${new Date().getFullYear()} roku
+- Uzywaj formatowania: **pogrubienie** dla waznych terminow, *pochylenie* dla nazw albumow/utworow
+- Formatuj odpowiedzi w przystepny sposob z listami i akapitami`;
 
         let userMessage = text;
         if (formatted.text) {
@@ -379,7 +456,7 @@ Twoje zadania:
             aiResponse = JSON.stringify(response);
         }
 
-        chat.messages.push({ role: 'assistant', content: aiResponse, searched, sources });
+        chat.messages.push({ role: 'assistant', content: aiResponse, searched, sources, searchEngine });
         saveChats();
 
     } catch (error) {
@@ -413,6 +490,24 @@ elements.searchToggle.addEventListener('click', () => {
 });
 
 elements.newChat.addEventListener('click', createChat);
+
+const sidebarToggle = document.getElementById('sidebarToggle');
+const sidebar = document.getElementById('sidebar');
+const sidebarOverlay = document.getElementById('sidebarOverlay');
+
+if (sidebarToggle) {
+    sidebarToggle.addEventListener('click', () => {
+        sidebar.classList.toggle('open');
+        sidebarOverlay.classList.toggle('active');
+    });
+}
+
+if (sidebarOverlay) {
+    sidebarOverlay.addEventListener('click', () => {
+        sidebar.classList.remove('open');
+        sidebarOverlay.classList.remove('active');
+    });
+}
 
 if (chats.length === 0) {
     createChat();
