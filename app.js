@@ -67,13 +67,13 @@ function renderMessages() {
     if (chat.messages.length === 0) {
         elements.messages.innerHTML = `
             <div class="welcome-msg">
-                <h2>TrapAi 🔥</h2>
-                <p>Twój asystent do trapowych newsów, muzyki i kultury</p>
-                <p class="welcome-hint">Zapytaj o najnowsze premiery, artystów, newsy</p>
+                <h2>TrapAi</h2>
+                <p>Twoj asystent do trapowych newsow, muzyki i kultury</p>
+                <p class="welcome-hint">Zapytaj o najnowsze premiery, artystow, newsy</p>
                 <div class="quick-commands">
-                    <button class="quick-cmd" onclick="quickAsk('Co słychać w trapie?')">Newsy trapowe</button>
+                    <button class="quick-cmd" onclick="quickAsk('Co slychac w trapie?')">Newsy trapowe</button>
                     <button class="quick-cmd" onclick="quickAsk('Polecisz dobre trap albumy?')">Albumy</button>
-                    <button class="quick-cmd" onclick="quickAsk('Kto jest hot w trapie?')">Hot artyści</button>
+                    <button class="quick-cmd" onclick="quickAsk('Kto jest hot w trapie?')">Hot artysci</button>
                     <button class="quick-cmd" onclick="quickAsk('Co to jest trap?')">Czym jest trap?</button>
                 </div>
             </div>
@@ -107,7 +107,9 @@ window.quickAsk = function(text) {
 
 async function searchWeb(query) {
     try {
-        const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+        const searchQuery = query + ' trap muzyka newsy 2025 2026';
+        const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(searchQuery)}`;
+        
         const response = await puter.net.fetch(searchUrl);
         const html = await response.text();
         
@@ -115,22 +117,41 @@ async function searchWeb(query) {
         const doc = parser.parseFromString(html, 'text/html');
         
         const results = [];
-        doc.querySelectorAll('div.g, div[data-sokoban-container]').forEach((el, i) => {
+        doc.querySelectorAll('.result').forEach((el, i) => {
             if (i >= 5) return;
-            const title = el.querySelector('h3')?.textContent || '';
-            const snippet = el.querySelector('div[data-sncf], div.VwiC3b, span.aCOpRe')?.textContent || '';
-            const link = el.querySelector('a')?.href || '';
+            const titleEl = el.querySelector('.result__title a, .result__a');
+            const snippetEl = el.querySelector('.result__snippet');
+            
+            const title = titleEl?.textContent?.trim() || '';
+            const snippet = snippetEl?.textContent?.trim() || '';
+            
             if (title) {
-                results.push({ title, snippet, link });
+                results.push({ title, snippet });
             }
         });
         
         if (results.length > 0) {
-            return results.map(r => `${r.title}\n${r.snippet}\n${r.link}`).join('\n\n');
+            return results.map((r, i) => 
+                `${i + 1}. ${r.title}\n   ${r.snippet}`
+            ).join('\n\n');
         }
-        return 'Nie znaleziono wyników wyszukiwania.';
+        
+        const fallbackResults = [];
+        doc.querySelectorAll('a.result__url, .result__title').forEach((el, i) => {
+            if (i >= 5) return;
+            const text = el.textContent?.trim() || '';
+            if (text && text.length > 5) {
+                fallbackResults.push(text);
+            }
+        });
+        
+        if (fallbackResults.length > 0) {
+            return 'Znaleziono:\n' + fallbackResults.join('\n');
+        }
+        
+        return 'Nie znaleziono wynikow w sieci.';
     } catch (error) {
-        return `Błąd wyszukiwania: ${error.message}`;
+        return `Blad wyszukiwania: ${error.message}`;
     }
 }
 
@@ -167,28 +188,38 @@ async function sendMessage() {
 
     try {
         const model = elements.modelSelect.value;
-        const systemPrompt = `Jesteś TrapAi - ekspertem od trapowej muzyki, kultury i newsów. 
+        const systemPrompt = `Jestes TrapAi - ekspertem od trapowej muzyki, kultury i newsow. 
 
 Twoje zadania:
-- Odpowiadasz o trapowej muzyce (polskiej i światowej)
-- Znasz najnowsze newsy, premiery, plotki ze świata trapu
-- Polecasz albumy, utwory, artystów
-- Wyjaśniasz historię i ewolucję trapu
+- Odpowiadasz o trapowej muzyce (polskiej i swiatowej)
+- Znasz najnowsze newsy, premiery, plotki ze swiata trapu
+- Polecasz albumy, utwory, artystow
+- Wyjasniasz historie i ewolucje trapu
 - Odpowiadasz o kulturze hip-hopu i streetwearze
-- Język: polski (chyba że użytkownik pisze po angielsku)
-- Styl: luźny, ale kompetentny - jak kumpel który zna się na rzeczy
-- Emoji: używaj trapowych emoji 🔥🎤🎧💀`;
+- Jezyk: polski (chyba ze uzytkownik pisze po angielsku)
+- Styl: luzny, ale kompetentny - jak kumpel ktory zna sie na rzeczy`;
 
         let searchResults = '';
         let searched = false;
 
-        if (searchEnabled || text.toLowerCase().includes('szukaj') || text.toLowerCase().includes('sprawdź') || text.toLowerCase().includes('newsy') || text.toLowerCase().includes('najnowsze')) {
-            searchResults = await searchWeb(text + ' trap muzyka 2025 2026');
+        const lowerText = text.toLowerCase();
+        const shouldSearch = searchEnabled || 
+            lowerText.includes('szukaj') || 
+            lowerText.includes('sprawdz') || 
+            lowerText.includes('newsy') || 
+            lowerText.includes('najnowsze') ||
+            lowerText.includes('aktualne') ||
+            lowerText.includes('co sie dzieje') ||
+            lowerText.includes('premiera') ||
+            lowerText.includes('premiery');
+
+        if (shouldSearch) {
+            searchResults = await searchWeb(text);
             searched = true;
         }
 
         let userMessage = text;
-        if (searchResults && searchResults !== 'Nie znaleziono wyników wyszukiwania.') {
+        if (searchResults && searchResults !== 'Nie znaleziono wynikow w sieci.') {
             userMessage = `${text}\n\n[Wyniki wyszukiwania w internecie]:\n${searchResults}`;
         }
 
@@ -217,7 +248,7 @@ Twoje zadania:
         saveChats();
 
     } catch (error) {
-        chat.messages.push({ role: 'assistant', content: `Błąd: ${error.message}` });
+        chat.messages.push({ role: 'assistant', content: `Blad: ${error.message}` });
         saveChats();
     }
 
