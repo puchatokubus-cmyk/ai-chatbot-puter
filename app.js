@@ -12,6 +12,8 @@ const elements = {
 let chats = JSON.parse(localStorage.getItem('trap_chats') || '[]');
 let currentChatId = localStorage.getItem('trap_current_chat');
 let searchEnabled = false;
+const searchCache = new Map();
+const CACHE_DURATION = 5 * 60 * 1000;
 
 function saveChats() {
     localStorage.setItem('trap_chats', JSON.stringify(chats));
@@ -83,10 +85,14 @@ function renderMessages() {
 
     elements.messages.innerHTML = chat.messages.map(msg => {
         const searchBadge = msg.searched ? '<span class="search-badge">+ szukanie w sieci</span>' : '';
+        const sourcesHtml = msg.sources && msg.sources.length > 0 
+            ? `<div class="message-sources"><span>Zrodla:</span> ${msg.sources.map((s, i) => `<a href="${s}" target="_blank">[${i+1}]</a>`).join(' ')}</div>`
+            : '';
         return `
             <div class="message ${msg.role}">
                 <div class="message-role">${msg.role === 'user' ? 'Ty' : 'TrapAi'}${searchBadge}</div>
                 <div class="message-content">${escapeHtml(msg.content)}</div>
+                ${sourcesHtml}
             </div>
         `;
     }).join('');
@@ -105,10 +111,40 @@ window.quickAsk = function(text) {
     sendMessage();
 };
 
-async function searchWeb(query) {
+function getCachedResults(query) {
+    const cached = searchCache.get(query);
+    if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+        return cached.data;
+    }
+    searchCache.delete(query);
+    return null;
+}
+
+function setCacheResults(query, data) {
+    searchCache.set(query, { data, timestamp: Date.now() });
+    if (searchCache.size > 50) {
+        const firstKey = searchCache.keys().next().value;
+        searchCache.delete(firstKey);
+    }
+}
+
+async function fetchWithTimeout(url, timeout = 10000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    try {
+        const response = await puter.net.fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        return response;
+    } catch (error) {
+        clearTimeout(timeoutId);
+        throw error;
+    }
+}
+
+async function searchDuckDuckGo(query) {
     try {
         const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-        const response = await puter.net.fetch(searchUrl);
+        const response = await fetchWithTimeout(searchUrl, 15000);
         const html = await response.text();
         
         const parser = new DOMParser();
@@ -117,27 +153,129 @@ async function searchWeb(query) {
         const results = [];
         const resultElements = doc.querySelectorAll('.result');
         
-        for (let i = 0; i < Math.min(resultElements.length, 5); i++) {
+        for (let i = 0; i < Math.min(resultElements.length, 8); i++) {
             const el = resultElements[i];
-            const titleEl = el.querySelector('.result__title a, .result__a');
+            const titleEl = el.querySelector('.result__title');
+            const linkEl = titleEl ? titleEl.querySelector('a') : null;
             const snippetEl = el.querySelector('.result__snippet');
             
-            if (titleEl) {
-                const title = titleEl.textContent.trim();
+            if (linkEl) {
+                const title = linkEl.textContent.trim();
+                const href = linkEl.getAttribute('href');
+                let url = href;
+                if (href && href.includes('uddg=')) {
+                    const match = href.match(/uddg=([^&]+)/);
+                    if (match) url = decodeURIComponent(match[1]);
+                }
                 const snippet = snippetEl ? snippetEl.textContent.trim() : '';
-                results.push(`${title} - ${snippet}`);
+                results.push({ title, snippet, url });
             }
         }
         
-        if (results.length > 0) {
-            return results.join('\n\n');
+        return results;
+    } catch (error) {
+        return [];
+    }
+}
+
+async function searchBrave(query) {
+    try {
+        const searchUrl = `https://search.brave.com/search?q=${encodeURIComponent(query)}`;
+        const response = await fetchWithTimeout(searchUrl, 15000);
+        const html = await response.text();
+        
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+        
+        const results = [];
+        const resultElements = doc.querySelectorAll('.snippet');
+        
+        for (let i = 0; i < Math.min(resultElements.length, 8); i++) {
+            const el = resultElements[i];
+            const titleEl = el.querySelector('.snippet-title');
+            const linkEl = el.querySelector('a');
+            const descEl = el.querySelector('.snippet-description');
+            
+            if (titleEl && linkEl) {
+                results.push({
+                    title: titleEl.textContent.trim(),
+                    url: linkEl.href,
+                    snippet: descEl ? descEl.textContent.trim() : ''
+                });
+            }
         }
         
-        const allText = doc.body.innerText.substring(0, 2000);
-        return allText || 'Brak wynikow';
+        return results;
     } catch (error) {
-        return `Blad: ${error.message}`;
+        return [];
     }
+}
+
+async function searchGoogle(query) {
+    try {
+        const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&hl=pl`;
+        const response = await fetchWithTimeout(searchUrl, 15000);
+        const html = await response.text();
+        
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+        
+        const results = [];
+        const resultElements = doc.querySelectorAll('div.g, div[data-sokoban-container]');
+        
+        for (let i = 0; i < Math.min(resultElements.length, 8); i++) {
+            const el = resultElements[i];
+            const titleEl = el.querySelector('h3');
+            const linkEl = el.querySelector('a');
+            const snippetEl = el.querySelector('div[data-sncf], div.VwiC3b, span.aCOpRe');
+            
+            if (titleEl && linkEl && linkEl.href.startsWith('http')) {
+                results.push({
+                    title: titleEl.textContent.trim(),
+                    url: linkEl.href,
+                    snippet: snippetEl ? snippetEl.textContent.trim() : ''
+                });
+            }
+        }
+        
+        return results;
+    } catch (error) {
+        return [];
+    }
+}
+
+async function searchWeb(query) {
+    const cached = getCachedResults(query);
+    if (cached) return cached;
+    
+    let results = [];
+    
+    results = await searchDuckDuckGo(query);
+    if (results.length === 0) {
+        results = await searchBrave(query);
+    }
+    if (results.length === 0) {
+        results = await searchGoogle(query);
+    }
+    
+    if (results.length > 0) {
+        setCacheResults(query, results);
+    }
+    
+    return results;
+}
+
+function formatSearchResults(results) {
+    if (!results || results.length === 0) {
+        return { text: '', sources: [] };
+    }
+    
+    const sources = results.map(r => r.url).filter(u => u);
+    const text = results.map((r, i) => {
+        return `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`;
+    }).join('\n\n');
+    
+    return { text, sources };
 }
 
 async function sendMessage() {
@@ -184,19 +322,23 @@ async function sendMessage() {
             lowerText.includes('co sie dzieje') ||
             lowerText.includes('premiera') ||
             lowerText.includes('premiery') ||
-            lowerText.includes('kto') ||
-            lowerText.includes('jakie') ||
+            lowerText.includes('kto jest') ||
             lowerText.includes('jakie sa') ||
-            lowerText.includes('co nowego');
+            lowerText.includes('co nowego') ||
+            lowerText.includes('nowy') ||
+            lowerText.includes('nowa');
 
-        let searchContext = '';
+        let searchResults = [];
         let searched = false;
+        let sources = [];
 
         if (shouldSearch) {
-            const searchQuery = text + ' trap muzyka 2025 2026';
-            searchContext = await searchWeb(searchQuery);
+            searchResults = await searchWeb(text + ' trap muzyka 2025 2026');
             searched = true;
         }
+
+        const formatted = formatSearchResults(searchResults);
+        sources = formatted.sources;
 
         let systemPrompt = `Jestes TrapAi - ekspertem od trapowej muzyki, kultury i newsow. 
 
@@ -207,15 +349,13 @@ Twoje zadania:
 - Wyjasniasz historie i ewolucje trapu
 - Odpowiadasz o kulturze hip-hopu i streetwearze
 - Jezyk: polski (chyba ze uzytkownik pisze po angielsku)
-- Styl: luzny, ale kompetentny - jak kumpel ktory zna sie na rzeczy`;
-
-        if (searchContext) {
-            systemPrompt += `\n\nMasz dostep do swiezych wynikow wyszukiwania z internecie. Uzyj ich aby odpowiedziec na pytanie uzytkownika. Podawaj aktualne informacje z 2025/2026 roku. Jesli wyniki wyszukiwania zawieraja relevantne informacje, odnies sie do nich.`;
-        }
+- Styl: luzny, ale kompetentny - jak kumpel ktory zna sie na rzeczy
+- Zawsze podawaj aktualne informacje z 2025/2026 roku`;
 
         let userMessage = text;
-        if (searchContext) {
-            userMessage = `${text}\n\n--- WYNIKI WYSZUKIWANIA W INTERNECIE ---\n${searchContext}\n--- KONIEC WYNIKOW ---`;
+        if (formatted.text) {
+            systemPrompt += `\n\nMasz dostep do swiezych wynikow wyszukiwania z internecie. Uzyj ich aby odpowiedziec na pytanie uzytkownika. Podawaj aktualne informacje. Jesli wyniki wyszukiwania zawieraja relevantne informacje, odnies sie do nich i podaj zrodla.`;
+            userMessage = `${text}\n\n--- WYNIKI WYSZUKIWANIA ---\n${formatted.text}\n--- KONIEC WYNIKOW ---`;
         }
 
         const messagesPayload = [
@@ -239,7 +379,7 @@ Twoje zadania:
             aiResponse = JSON.stringify(response);
         }
 
-        chat.messages.push({ role: 'assistant', content: aiResponse, searched });
+        chat.messages.push({ role: 'assistant', content: aiResponse, searched, sources });
         saveChats();
 
     } catch (error) {
